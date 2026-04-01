@@ -984,25 +984,28 @@ setup_fleet_server() {
   log "CREDENTIAL: fleet_service_token=${token}"
   success "Service token generated"
 
-  info "Starting Fleet Server via elastic-agent..."
+  info "Enrolling elastic-agent as Fleet Server..."
   local ca_flag=""
   if [[ -f "$ca_cert" ]]; then ca_flag="--fleet-server-es-ca=${ca_cert}"; fi
 
+  # elastic-agent was installed via package manager, so use 'enroll' (not 'install')
+  # 'install' is for tarball deployments where the agent isn't already on the system.
   # shellcheck disable=SC2086
-  if run_with_spinner "Installing Fleet Server (elastic-agent)" \
-      elastic-agent install \
+  if run_with_spinner "Enrolling elastic-agent as Fleet Server" \
+      elastic-agent enroll \
         --fleet-server-es="${es_url}" \
         --fleet-server-service-token="${token}" \
         --fleet-server-host="${FLEET_HOST}" \
         --fleet-server-port=8220 \
         $ca_flag \
         --non-interactive; then
-    success "Fleet Server started on ${FLEET_HOST}:8220"
+    success "Fleet Server enrolled"
   else
-    warn "Fleet Server setup had issues — check: elastic-agent status"
+    warn "Fleet Server enrollment had issues — check: journalctl -u elastic-agent -n 50"
   fi
 
   open_firewall_port 8220
+  start_service "elastic-agent"
 }
 
 # ── Summary ───────────────────────────────────────────────────────────────────
