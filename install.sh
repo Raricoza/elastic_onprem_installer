@@ -677,7 +677,7 @@ recover_es_password() {
     | grep -v "$(basename "$LOG_FILE")" || true)
 
   if [[ -n "$recovered" ]]; then
-    if curl -sk "${ES_LOCAL_URL}/_cluster/health" \
+    if curl -skf "${ES_LOCAL_URL}/_cluster/health" \
         -u "elastic:${recovered}" -o /dev/null 2>/dev/null; then
       ES_PASSWORD="$recovered"
       info "Recovered elastic password from previous install log"
@@ -691,7 +691,7 @@ recover_es_password() {
   echo -en "${BOLD}  Enter existing 'elastic' password${NC}: "
   read -rs ES_PASSWORD
   echo ""
-  if curl -sk "${ES_LOCAL_URL}/_cluster/health" \
+  if curl -skf "${ES_LOCAL_URL}/_cluster/health" \
       -u "elastic:${ES_PASSWORD}" -o /dev/null 2>/dev/null; then
     success "Authenticated with provided password"
     log "CREDENTIAL: elastic_password (recovered manually)=${ES_PASSWORD}"
@@ -1010,19 +1010,28 @@ wait_for_kibana() {
 # ── Post-install security setup ───────────────────────────────────────────────
 setup_es_security() {
   step "Setting Elasticsearch credentials"
-  wait_for_es || return
+  wait_for_es || return 0   # ES not ready — non-fatal, skip credential steps
 
-  # On a re-run ES is already secured — try to recover the password rather than
-  # resetting it (which would break any running Kibana / Fleet connections).
+  # On a re-run ES is already secured — try to recover the password from a
+  # previous install log rather than resetting it (which would invalidate any
+  # existing Kibana / Fleet connections).
+  # Only attempt recovery when a previous log file actually exists; on a fresh
+  # install there is no prior log and no existing password to recover.
   if [[ -z "$ES_PASSWORD" ]]; then
-    if recover_es_password; then
-      # Successfully authenticated with a recovered/entered password —
-      # skip the reset and go straight to applying any custom password.
+    local has_prev_log=false
+    if ls "${SCRIPT_DIR}"/elastic-install-*.log 2>/dev/null \
+        | grep -qv "$(basename "$LOG_FILE")"; then
+      has_prev_log=true
+    fi
+
+    if [[ "$has_prev_log" == true ]] && recover_es_password; then
+      # Recovered a working password — skip the reset.
+      # Fall through only if the user also wants a custom password applied.
       if [[ -n "$CUSTOM_ELASTIC_PASSWORD" ]] && \
          [[ "$ES_PASSWORD" != "$CUSTOM_ELASTIC_PASSWORD" ]]; then
-        : # fall through to custom-password block below
+        : # fall through to apply custom password below
       else
-        return
+        return 0
       fi
     fi
   fi
