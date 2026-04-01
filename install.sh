@@ -1017,6 +1017,26 @@ wait_for_kibana() {
   return 1
 }
 
+wait_for_fleet_server() {
+  local fleet_host="$1"   # IP or hostname Fleet Server is bound to
+  info "Waiting for Fleet Server to become healthy on :8220..."
+  local retries=36 elapsed=0   # up to 3 minutes
+  while [[ $retries -gt 0 ]]; do
+    if curl -sk "https://${fleet_host}:8220/api/status" -o /dev/null 2>/dev/null; then
+      printf "\r%-80s\r" ""
+      success "Fleet Server is healthy"
+      return 0
+    fi
+    printf "\r  ${CYAN}[●]${NC} Fleet Server not yet ready... ${DIM}%ds${NC}" "$elapsed"
+    sleep 5
+    (( retries-- )) || true
+    (( elapsed += 5 )) || true
+  done
+  printf "\r%-80s\r" ""
+  warn "Fleet Server not responding after 180s."
+  return 1
+}
+
 # ── Post-install security setup ───────────────────────────────────────────────
 setup_es_security() {
   step "Setting Elasticsearch credentials"
@@ -1498,6 +1518,22 @@ main() {
     # Wait for Kibana before Fleet so the Fleet UI registers correctly
     if [[ "$INSTALL_KIBANA" == true ]]; then wait_for_kibana; fi
     setup_fleet_server
+
+    # Kibana starts before Fleet Server, so it logs:
+    #   "Secrets storage is disabled as minimum fleet server version has not been met"
+    # Once Fleet Server is healthy, restart Kibana so it re-detects it and
+    # re-enables secrets storage.
+    if [[ "$INSTALL_KIBANA" == true ]]; then
+      local fleet_host_ip="$FLEET_HOST"
+      if [[ "$fleet_host_ip" == "0.0.0.0" ]]; then
+        fleet_host_ip=$(hostname -I | awk '{print $1}')
+      fi
+      if wait_for_fleet_server "$fleet_host_ip"; then
+        step "Restarting Kibana to enable Fleet secrets storage"
+        systemctl restart kibana >> "$LOG_FILE" 2>&1 || true
+        wait_for_kibana || true
+      fi
+    fi
   fi
 
   echo ""
