@@ -49,6 +49,9 @@ INITIAL_MASTERS=()
 KIBANA_ENROLLMENT_TOKEN=""  # captured after enrollment token is generated
 KIBANA_ENC_KEY=""           # generated during configure_kibana; re-applied after enrollment
 
+ES_LOCAL_URL=""             # https://<bound-ip>:9200  — set in main() after menu_network
+KIBANA_LOCAL_URL=""         # http://<bound-ip>:5601   — set in main() after menu_network
+
 OS_FAMILY=""                # rhel | debian
 PKG_MANAGER=""              # dnf | yum | apt-get
 
@@ -657,7 +660,7 @@ recover_es_password() {
     | grep -v "$(basename "$LOG_FILE")" || true)
 
   if [[ -n "$recovered" ]]; then
-    if curl -sk "https://localhost:9200/_cluster/health" \
+    if curl -sk "${ES_LOCAL_URL}/_cluster/health" \
         -u "elastic:${recovered}" -o /dev/null 2>/dev/null; then
       ES_PASSWORD="$recovered"
       info "Recovered elastic password from previous install log"
@@ -671,7 +674,7 @@ recover_es_password() {
   echo -en "${BOLD}  Enter existing 'elastic' password${NC}: "
   read -rs ES_PASSWORD
   echo ""
-  if curl -sk "https://localhost:9200/_cluster/health" \
+  if curl -sk "${ES_LOCAL_URL}/_cluster/health" \
       -u "elastic:${ES_PASSWORD}" -o /dev/null 2>/dev/null; then
     success "Authenticated with provided password"
     log "CREDENTIAL: elastic_password (recovered manually)=${ES_PASSWORD}"
@@ -870,7 +873,7 @@ configure_kibana() {
   cp "$conf" "${conf}.bak"
 
   local es_url
-  [[ "$INSTALL_ES" == true ]] && es_url="https://localhost:9200" || es_url="${ES_EXTERNAL_URL}"
+  [[ "$INSTALL_ES" == true ]] && es_url="${ES_LOCAL_URL}" || es_url="${ES_EXTERNAL_URL}"
 
   # Fleet requires a stable 32-char encryption key for saved objects.
   # Generate once and store globally so we can re-apply it after kibana-setup
@@ -919,12 +922,14 @@ open_firewall_port() {
 # ── Service management ────────────────────────────────────────────────────────
 start_service() {
   local svc="$1"
+  # Always reload unit files before checking/starting — picks up any changes
+  # made by the package install or config steps.
+  systemctl daemon-reload >> "$LOG_FILE" 2>&1
   if systemctl is-active --quiet "$svc" 2>/dev/null; then
     info "${svc} is already running"
     return 0
   fi
   step "Starting ${svc}"
-  systemctl daemon-reload >> "$LOG_FILE" 2>&1
   systemctl enable "$svc" >> "$LOG_FILE" 2>&1
   systemctl start  "$svc" >> "$LOG_FILE" 2>&1 || true
 
@@ -949,7 +954,7 @@ wait_for_es() {
   info "Waiting for Elasticsearch to accept connections on :9200..."
   local retries=24 elapsed=0
   while [[ $retries -gt 0 ]]; do
-    if curl -sk "https://localhost:9200" -o /dev/null 2>/dev/null; then
+    if curl -sk "${ES_LOCAL_URL}" -o /dev/null 2>/dev/null; then
       printf "\r%-80s\r" ""
       return 0
     fi
@@ -968,7 +973,7 @@ wait_for_kibana() {
   local retries=36 elapsed=0   # up to 3 minutes; Kibana can be slow on first start
   while [[ $retries -gt 0 ]]; do
     local status
-    status=$(curl -sk "http://localhost:5601/api/status" 2>/dev/null \
+    status=$(curl -sk "${KIBANA_LOCAL_URL}/api/status" 2>/dev/null \
       | grep -o '"level":"[^"]*"' | head -1 | grep -o '[^"]*"$' | tr -d '"') || true
     if [[ "$status" == "available" || "$status" == "degraded" ]]; then
       printf "\r%-80s\r" ""
@@ -1031,7 +1036,7 @@ setup_es_security() {
     local escaped_pw result
     escaped_pw=$(printf '%s' "$CUSTOM_ELASTIC_PASSWORD" | sed 's/\\/\\\\/g; s/"/\\"/g')
     result=$(curl -sk -X POST \
-      "https://localhost:9200/_security/user/elastic/_password" \
+      "${ES_LOCAL_URL}/_security/user/elastic/_password" \
       -u "elastic:${ES_PASSWORD}" \
       -H "Content-Type: application/json" \
       -d "{\"password\": \"${escaped_pw}\"}" 2>>"$LOG_FILE") || true
@@ -1054,7 +1059,7 @@ setup_kibana_password() {
   local escaped_pw result
   escaped_pw=$(printf '%s' "$CUSTOM_KIBANA_PASSWORD" | sed 's/\\/\\\\/g; s/"/\\"/g')
   result=$(curl -sk -X POST \
-    "https://localhost:9200/_security/user/kibana_system/_password" \
+    "${ES_LOCAL_URL}/_security/user/kibana_system/_password" \
     -u "elastic:${ES_PASSWORD}" \
     -H "Content-Type: application/json" \
     -d "{\"password\": \"${escaped_pw}\"}" 2>>"$LOG_FILE") || true
@@ -1125,7 +1130,7 @@ setup_fleet_server() {
 
   step "Configuring Fleet Server"
 
-  local kibana_url="http://localhost:5601"
+  local kibana_url="${KIBANA_LOCAL_URL}"
   local ca_cert="/etc/elasticsearch/certs/http_ca.crt"
 
   # Resolve any 0.0.0.0 bind addresses to the actual primary IP.
@@ -1142,7 +1147,7 @@ setup_fleet_server() {
   # Agent-facing ES URL (distributed to enrolled agents): must be a real IP.
   local es_url_internal es_url_agents
   if [[ "$INSTALL_ES" == true ]]; then
-    es_url_internal="https://localhost:9200"
+    es_url_internal="${ES_LOCAL_URL}"
     es_url_agents="https://${es_host}:9200"
   else
     es_url_internal="${ES_EXTERNAL_URL}"
@@ -1376,6 +1381,18 @@ main() {
 
   menu_passwords
   menu_confirm
+
+  # Resolve bind addresses to usable connection URLs.
+  # When a service binds to 0.0.0.0 it listens on all interfaces including
+  # 127.0.0.1, so localhost is safe. When bound to a specific IP, we must
+  # connect to that IP — localhost/127.0.0.1 won't be listened on.
+  local es_conn_host="$NETWORK_HOST"
+  if [[ "$es_conn_host" == "0.0.0.0" ]]; then es_conn_host="127.0.0.1"; fi
+  ES_LOCAL_URL="https://${es_conn_host}:9200"
+
+  local kibana_conn_host="$KIBANA_HOST"
+  if [[ "$kibana_conn_host" == "0.0.0.0" ]]; then kibana_conn_host="127.0.0.1"; fi
+  KIBANA_LOCAL_URL="http://${kibana_conn_host}:5601"
 
   echo ""
   hr
