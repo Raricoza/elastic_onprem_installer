@@ -147,6 +147,54 @@ prompt_password() {
   done
 }
 
+# Return non-loopback IPv4 addresses, one per line.
+_detect_ips() {
+  ip -4 addr show 2>/dev/null \
+    | awk '/inet / && !/127\.0\.0\.1/ { gsub(/\/[0-9]+/, "", $2); print $2 }' \
+    || true
+}
+
+# Present a numbered list of local IPs and let the user pick one.
+# Sets the named variable to the chosen address.
+pick_bind_ip() {
+  local service="$1" varname="$2"
+  local -a ips
+  mapfile -t ips < <(_detect_ips)
+
+  local i=1
+  for ip in "${ips[@]}"; do
+    echo -e "    ${BOLD}${i})${NC} ${ip}"
+    (( i++ )) || true
+  done
+  local all_idx=$i
+  echo -e "    ${BOLD}${i})${NC} 0.0.0.0  ${DIM}(all interfaces)${NC}"
+  (( i++ )) || true
+  local manual_idx=$i
+  echo -e "    ${BOLD}${i})${NC} Enter manually"
+  echo ""
+
+  local default_choice=1
+  if [[ ${#ips[@]} -eq 0 ]]; then default_choice=$all_idx; fi
+
+  prompt "Bind address for ${service}" "$default_choice"
+  local choice="$REPLY"
+
+  if [[ "$choice" =~ ^[0-9]+$ ]]; then
+    local idx=$(( choice - 1 ))
+    if [[ $idx -lt ${#ips[@]} ]]; then
+      printf -v "$varname" '%s' "${ips[$idx]}"
+    elif [[ $choice -eq $all_idx ]]; then
+      printf -v "$varname" '%s' "0.0.0.0"
+    else
+      prompt "Enter IP address" ""
+      printf -v "$varname" '%s' "$REPLY"
+    fi
+  else
+    # User typed an address directly
+    printf -v "$varname" '%s' "$choice"
+  fi
+}
+
 # ── OS Detection ──────────────────────────────────────────────────────────────
 detect_os() {
   step "Detecting operating system"
@@ -445,25 +493,26 @@ menu_multi_node() {
 menu_network() {
   step "Network binding"
   echo ""
-  info "Enter the IP address each service should bind to, or 0.0.0.0 to listen on all interfaces."
+  info "Select the IP address each service should bind to."
+  info "Choose a specific IP so Fleet Server and agents can reach each other."
   echo ""
 
-  local detected_ip
-  detected_ip=$(hostname -I | awk '{print $1}')
-
   if [[ "$INSTALL_ES" == true ]]; then
-    prompt "Elasticsearch bind address (network.host)" "0.0.0.0"
-    NETWORK_HOST="$REPLY"
+    echo -e "  ${BOLD}Elasticsearch${NC}  (port 9200)"
+    pick_bind_ip "Elasticsearch" NETWORK_HOST
+    echo ""
   fi
 
   if [[ "$INSTALL_KIBANA" == true ]]; then
-    prompt "Kibana bind address (server.host)" "0.0.0.0"
-    KIBANA_HOST="$REPLY"
+    echo -e "  ${BOLD}Kibana${NC}  (port 5601)"
+    pick_bind_ip "Kibana" KIBANA_HOST
+    echo ""
   fi
 
   if [[ "$INSTALL_FLEET" == true ]]; then
-    prompt "Fleet Server bind address" "0.0.0.0"
-    FLEET_HOST="$REPLY"
+    echo -e "  ${BOLD}Fleet Server${NC}  (port 8220)"
+    pick_bind_ip "Fleet Server" FLEET_HOST
+    echo ""
   fi
 }
 
@@ -957,19 +1006,31 @@ setup_kibana_enrollment() {
 setup_fleet_server() {
   step "Configuring Fleet Server"
 
-  local es_url kibana_url
-  [[ "$INSTALL_ES" == true ]] && es_url="https://localhost:9200" || es_url="${ES_EXTERNAL_URL}"
-  kibana_url="http://localhost:5601"
-
+  local kibana_url="http://localhost:5601"
   local ca_cert="/etc/elasticsearch/certs/http_ca.crt"
 
-  # Resolve bind address to a real IP for the Fleet Server URL.
-  # Agents need a routable address — 0.0.0.0 is not valid as a URL.
+  # Resolve any 0.0.0.0 bind addresses to the actual primary IP.
+  # Fleet agents need routable addresses — 0.0.0.0/localhost are not valid URLs.
   local host_ip
   host_ip=$(hostname -I | awk '{print $1}')
-  local fleet_display_host="$FLEET_HOST"
-  if [[ "$fleet_display_host" == "0.0.0.0" ]]; then fleet_display_host="$host_ip"; fi
-  local fleet_url="https://${fleet_display_host}:8220"
+
+  local es_host="$NETWORK_HOST"
+  if [[ "$es_host" == "0.0.0.0" ]]; then es_host="$host_ip"; fi
+  local fleet_host="$FLEET_HOST"
+  if [[ "$fleet_host" == "0.0.0.0" ]]; then fleet_host="$host_ip"; fi
+
+  # Internal ES URL (Fleet Server → ES on the same machine): localhost is fine.
+  # Agent-facing ES URL (distributed to enrolled agents): must be a real IP.
+  local es_url_internal es_url_agents
+  if [[ "$INSTALL_ES" == true ]]; then
+    es_url_internal="https://localhost:9200"
+    es_url_agents="https://${es_host}:9200"
+  else
+    es_url_internal="${ES_EXTERNAL_URL}"
+    es_url_agents="${ES_EXTERNAL_URL}"
+  fi
+
+  local fleet_url="https://${fleet_host}:8220"
 
   # ── Step 1: Initialize Fleet in Kibana ──────────────────────────────────────
   # This creates the Fleet Server integration policy and default agent policy.
@@ -1004,7 +1065,7 @@ setup_fleet_server() {
         -u "elastic:${ES_PASSWORD}" \
         -H "kbn-xsrf: true" \
         -H "Content-Type: application/json" \
-        -d "{\"name\":\"default\",\"type\":\"elasticsearch\",\"hosts\":[\"${es_url}\"],\"is_default\":true,\"is_default_monitoring\":true,\"ca_trusted_fingerprint\":\"${fingerprint}\"}" \
+        -d "{\"name\":\"default\",\"type\":\"elasticsearch\",\"hosts\":[\"${es_url_agents}\"],\"is_default\":true,\"is_default_monitoring\":true,\"ca_trusted_fingerprint\":\"${fingerprint}\"}" \
         >> "$LOG_FILE" 2>&1 || true
     fi
   fi
@@ -1014,7 +1075,7 @@ setup_fleet_server() {
   local token_json token token_name
   token_name="fleet-server-token-$(date +%s)"
   token_json=$(curl -sk -X POST \
-    "${es_url}/_security/service/elastic/fleet-server/credential/token/${token_name}" \
+    "${es_url_internal}/_security/service/elastic/fleet-server/credential/token/${token_name}" \
     -u "elastic:${ES_PASSWORD}" \
     -H "Content-Type: application/json" 2>>"$LOG_FILE") || true
 
@@ -1042,9 +1103,9 @@ setup_fleet_server() {
   # shellcheck disable=SC2086
   if run_with_spinner "Enrolling elastic-agent as Fleet Server" \
       elastic-agent enroll \
-        --fleet-server-es="${es_url}" \
+        --fleet-server-es="${es_url_internal}" \
         --fleet-server-service-token="${token}" \
-        --fleet-server-host="${FLEET_HOST}" \
+        --fleet-server-host="${fleet_host}" \
         --fleet-server-port=8220 \
         $ca_flag \
         --non-interactive; then
