@@ -624,6 +624,64 @@ REPO
   success "Repository configured"
 }
 
+# ── Idempotency helpers ───────────────────────────────────────────────────────
+
+# Returns 0 if the package is already installed.
+is_pkg_installed() {
+  local pkg="$1"
+  if [[ "$OS_FAMILY" == "debian" ]]; then
+    dpkg -s "$pkg" &>/dev/null
+  else
+    rpm -q "$pkg" &>/dev/null
+  fi
+}
+
+# Returns 0 if we have already written our config for this file
+# (we always cp the original to .bak before writing our version).
+is_configured() {
+  local conf="$1"
+  [[ -f "${conf}.bak" ]]
+}
+
+# Try to recover the elastic password from a previous install log.
+# If found and verifiable against ES, sets ES_PASSWORD and returns 0.
+# Otherwise prompts the user to enter it manually.
+recover_es_password() {
+  # Scan previous logs (excluding the current one) newest-first
+  local prev_log recovered
+  while IFS= read -r prev_log; do
+    recovered=$(grep "CREDENTIAL: elastic_password" "$prev_log" 2>/dev/null \
+      | tail -1 | sed 's/.*=//' || true)
+    if [[ -n "$recovered" ]]; then break; fi
+  done < <(ls -t "${SCRIPT_DIR}"/elastic-install-*.log 2>/dev/null \
+    | grep -v "$(basename "$LOG_FILE")" || true)
+
+  if [[ -n "$recovered" ]]; then
+    if curl -sk "https://localhost:9200/_cluster/health" \
+        -u "elastic:${recovered}" -o /dev/null 2>/dev/null; then
+      ES_PASSWORD="$recovered"
+      info "Recovered elastic password from previous install log"
+      return 0
+    fi
+    info "Found previous password in log but it no longer works — prompting"
+  fi
+
+  # Fall back to prompting
+  echo ""
+  echo -en "${BOLD}  Enter existing 'elastic' password${NC}: "
+  read -rs ES_PASSWORD
+  echo ""
+  if curl -sk "https://localhost:9200/_cluster/health" \
+      -u "elastic:${ES_PASSWORD}" -o /dev/null 2>/dev/null; then
+    success "Authenticated with provided password"
+    log "CREDENTIAL: elastic_password (recovered manually)=${ES_PASSWORD}"
+    return 0
+  fi
+  warn "Could not authenticate with provided password — will reset it"
+  ES_PASSWORD=""
+  return 1
+}
+
 # ── Install helpers ───────────────────────────────────────────────────────────
 _pkg_install_inner() {
   local pkg="$1"
@@ -643,18 +701,30 @@ pkg_install() {
 }
 
 install_elasticsearch() {
+  if is_pkg_installed "elasticsearch"; then
+    info "Elasticsearch already installed — skipping package install"
+    return
+  fi
   step "Installing Elasticsearch ${ELASTIC_VERSION}"
   pkg_install "elasticsearch"
   success "Elasticsearch installed"
 }
 
 install_kibana() {
+  if is_pkg_installed "kibana"; then
+    info "Kibana already installed — skipping package install"
+    return
+  fi
   step "Installing Kibana ${ELASTIC_VERSION}"
   pkg_install "kibana"
   success "Kibana installed"
 }
 
 install_fleet() {
+  if is_pkg_installed "elastic-agent"; then
+    info "Elastic Agent already installed — skipping package install"
+    return
+  fi
   step "Installing Elastic Agent ${ELASTIC_VERSION}"
   pkg_install "elastic-agent"
   success "Elastic Agent installed"
@@ -662,11 +732,14 @@ install_fleet() {
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 configure_elasticsearch() {
+  local conf="/etc/elasticsearch/elasticsearch.yml"
+  if is_configured "$conf"; then
+    info "Elasticsearch already configured — skipping"
+    return
+  fi
   step "Configuring Elasticsearch"
 
-  local conf="/etc/elasticsearch/elasticsearch.yml"
   local jvm_dir="/etc/elasticsearch/jvm.options.d"
-
   cp "$conf" "${conf}.bak"
 
   # JVM heap: 50 % of RAM, capped at 31 GB, minimum 512 MB
@@ -784,9 +857,16 @@ EOF
 }
 
 configure_kibana() {
+  local conf="/etc/kibana/kibana.yml"
+  if is_configured "$conf"; then
+    info "Kibana already configured — skipping"
+    # Ensure we still have the encryption key in memory for later steps
+    KIBANA_ENC_KEY=$(grep "encryptedSavedObjects.encryptionKey" "$conf" 2>/dev/null \
+      | sed "s/.*: *['\"]//; s/['\"]$//" || true)
+    return
+  fi
   step "Configuring Kibana"
 
-  local conf="/etc/kibana/kibana.yml"
   cp "$conf" "${conf}.bak"
 
   local es_url
@@ -839,6 +919,10 @@ open_firewall_port() {
 # ── Service management ────────────────────────────────────────────────────────
 start_service() {
   local svc="$1"
+  if systemctl is-active --quiet "$svc" 2>/dev/null; then
+    info "${svc} is already running"
+    return 0
+  fi
   step "Starting ${svc}"
   systemctl daemon-reload >> "$LOG_FILE" 2>&1
   systemctl enable "$svc" >> "$LOG_FILE" 2>&1
@@ -906,21 +990,39 @@ setup_es_security() {
   step "Setting Elasticsearch credentials"
   wait_for_es || return
 
-  info "Auto-generating elastic user password..."
-  local pw_output
-  pw_output=$(/usr/share/elasticsearch/bin/elasticsearch-reset-password \
-    -u elastic -a -b 2>>"$LOG_FILE") || true
+  # On a re-run ES is already secured — try to recover the password rather than
+  # resetting it (which would break any running Kibana / Fleet connections).
+  if [[ -z "$ES_PASSWORD" ]]; then
+    if recover_es_password; then
+      # Successfully authenticated with a recovered/entered password —
+      # skip the reset and go straight to applying any custom password.
+      if [[ -n "$CUSTOM_ELASTIC_PASSWORD" ]] && \
+         [[ "$ES_PASSWORD" != "$CUSTOM_ELASTIC_PASSWORD" ]]; then
+        : # fall through to custom-password block below
+      else
+        return
+      fi
+    fi
+  fi
 
-  ES_PASSWORD=$(echo "$pw_output" | awk '/New value:/ { print $NF }' || true)
+  # Only reset the password if we still don't have a working one.
+  if [[ -z "$ES_PASSWORD" ]]; then
+    info "Auto-generating elastic user password..."
+    local pw_output
+    pw_output=$(/usr/share/elasticsearch/bin/elasticsearch-reset-password \
+      -u elastic -a -b 2>>"$LOG_FILE") || true
 
-  if [[ -n "$ES_PASSWORD" ]]; then
-    log "CREDENTIAL: elastic_password (auto)=${ES_PASSWORD}"
-    success "elastic auto-password set"
-  else
-    warn "Could not auto-extract password from reset output."
-    warn "Run manually: /usr/share/elasticsearch/bin/elasticsearch-reset-password -u elastic"
-    ES_PASSWORD="(not captured — see above)"
-    return
+    ES_PASSWORD=$(echo "$pw_output" | awk '/New value:/ { print $NF }' || true)
+
+    if [[ -n "$ES_PASSWORD" ]]; then
+      log "CREDENTIAL: elastic_password (auto)=${ES_PASSWORD}"
+      success "elastic auto-password set"
+    else
+      warn "Could not auto-extract password from reset output."
+      warn "Run manually: /usr/share/elasticsearch/bin/elasticsearch-reset-password -u elastic"
+      ES_PASSWORD="(not captured — see above)"
+      return
+    fi
   fi
 
   # If the user provided a custom elastic password, apply it via the API
@@ -967,6 +1069,13 @@ setup_kibana_password() {
 }
 
 setup_kibana_enrollment() {
+  # Skip if Kibana already has an ES service account token in its keystore
+  if /usr/share/kibana/bin/kibana-keystore list 2>/dev/null \
+      | grep -q "elasticsearch.serviceAccountToken"; then
+    info "Kibana already enrolled with Elasticsearch — skipping"
+    return
+  fi
+
   step "Enrolling Kibana with Elasticsearch"
 
   info "Generating Kibana enrollment token..."
@@ -1004,6 +1113,16 @@ setup_kibana_enrollment() {
 }
 
 setup_fleet_server() {
+  # Skip enrollment if elastic-agent is already running as Fleet Server.
+  # Fleet setup (Kibana API calls) still runs so settings stay current.
+  local agent_already_enrolled=false
+  if systemctl is-active --quiet elastic-agent 2>/dev/null; then
+    if elastic-agent status 2>/dev/null | grep -qi "fleet-server\|healthy\|degraded"; then
+      info "elastic-agent already enrolled — skipping enrollment step"
+      agent_already_enrolled=true
+    fi
+  fi
+
   step "Configuring Fleet Server"
 
   local kibana_url="http://localhost:5601"
@@ -1070,48 +1189,50 @@ setup_fleet_server() {
     fi
   fi
 
-  # ── Step 4: Generate Fleet Server service token ──────────────────────────────
-  info "Generating Fleet Server service token..."
-  local token_json token token_name
-  token_name="fleet-server-token-$(date +%s)"
-  token_json=$(curl -sk -X POST \
-    "${es_url_internal}/_security/service/elastic/fleet-server/credential/token/${token_name}" \
-    -u "elastic:${ES_PASSWORD}" \
-    -H "Content-Type: application/json" 2>>"$LOG_FILE") || true
+  if [[ "$agent_already_enrolled" == false ]]; then
+    # ── Step 4: Generate Fleet Server service token ────────────────────────────
+    info "Generating Fleet Server service token..."
+    local token_json token token_name
+    token_name="fleet-server-token-$(date +%s)"
+    token_json=$(curl -sk -X POST \
+      "${es_url_internal}/_security/service/elastic/fleet-server/credential/token/${token_name}" \
+      -u "elastic:${ES_PASSWORD}" \
+      -H "Content-Type: application/json" 2>>"$LOG_FILE") || true
 
-  token=$(echo "$token_json" | python3 -c \
-    "import sys,json; d=json.load(sys.stdin); print(d.get('token',{}).get('value',''))" \
-    2>/dev/null || true)
+    token=$(echo "$token_json" | python3 -c \
+      "import sys,json; d=json.load(sys.stdin); print(d.get('token',{}).get('value',''))" \
+      2>/dev/null || true)
 
-  if [[ -z "$token" ]]; then
-    warn "Could not generate Fleet Server service token."
-    warn "To complete Fleet Server setup manually:"
-    warn "  1. In Kibana → Fleet → Settings → Add Fleet Server"
-    warn "  2. Run the enrollment command shown in the UI"
-    return
-  fi
+    if [[ -z "$token" ]]; then
+      warn "Could not generate Fleet Server service token."
+      warn "To complete Fleet Server setup manually:"
+      warn "  1. In Kibana → Fleet → Settings → Add Fleet Server"
+      warn "  2. Run the enrollment command shown in the UI"
+      return
+    fi
 
-  FLEET_SERVICE_TOKEN="$token"
-  log "CREDENTIAL: fleet_service_token=${token}"
-  success "Service token generated"
+    FLEET_SERVICE_TOKEN="$token"
+    log "CREDENTIAL: fleet_service_token=${token}"
+    success "Service token generated"
 
-  # ── Step 5: Enroll elastic-agent as Fleet Server ─────────────────────────────
-  # elastic-agent was installed via the package manager — use 'enroll', not 'install'.
-  local ca_flag=""
-  if [[ -f "$ca_cert" ]]; then ca_flag="--fleet-server-es-ca=${ca_cert}"; fi
+    # ── Step 5: Enroll elastic-agent as Fleet Server ───────────────────────────
+    # elastic-agent was installed via the package manager — use 'enroll', not 'install'.
+    local ca_flag=""
+    if [[ -f "$ca_cert" ]]; then ca_flag="--fleet-server-es-ca=${ca_cert}"; fi
 
-  # shellcheck disable=SC2086
-  if run_with_spinner "Enrolling elastic-agent as Fleet Server" \
-      elastic-agent enroll \
-        --fleet-server-es="${es_url_internal}" \
-        --fleet-server-service-token="${token}" \
-        --fleet-server-host="${fleet_host}" \
-        --fleet-server-port=8220 \
-        $ca_flag \
-        --non-interactive; then
-    success "Fleet Server enrolled"
-  else
-    warn "Fleet Server enrollment had issues — check: journalctl -u elastic-agent -n 50"
+    # shellcheck disable=SC2086
+    if run_with_spinner "Enrolling elastic-agent as Fleet Server" \
+        elastic-agent enroll \
+          --fleet-server-es="${es_url_internal}" \
+          --fleet-server-service-token="${token}" \
+          --fleet-server-host="${fleet_host}" \
+          --fleet-server-port=8220 \
+          $ca_flag \
+          --non-interactive; then
+      success "Fleet Server enrolled"
+    else
+      warn "Fleet Server enrollment had issues — check: journalctl -u elastic-agent -n 50"
+    fi
   fi
 
   open_firewall_port 8220
