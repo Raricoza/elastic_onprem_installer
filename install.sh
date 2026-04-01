@@ -91,16 +91,27 @@ run_with_spinner() {
 }
 
 banner() {
-  echo -e "${BOLD}${BLUE}"
-  cat <<'BANNER'
-  ███████╗██╗      █████╗ ███████╗████████╗██╗ ██████╗
-  ██╔════╝██║     ██╔══██╗██╔════╝╚══██╔══╝██║██╔════╝
-  █████╗  ██║     ███████║███████╗   ██║   ██║██║
-  ██╔══╝  ██║     ██╔══██║╚════██║   ██║   ██║██║
-  ███████╗███████╗██║  ██║███████║   ██║   ██║╚██████╗
-  ╚══════╝╚══════╝╚═╝  ╚═╝╚══════╝   ╚═╝   ╚═╝ ╚═════╝
-BANNER
-  echo -e "${NC}${DIM}  Stack On-Prem Installer — interactive setup${NC}"
+  # Brand colours (ANSI approximations)
+  local LY='\033[1;33m'   # Yellow  #FEC514
+  local LT='\033[0;36m'   # Teal    #02BCB7
+  local LP='\033[0;35m'   # Pink    #F04E98
+  local LB='\033[1;34m'   # Lt Blue #1BA9F5
+  local LG='\033[1;32m'   # Green   #9ADC30
+  local LD='\033[0;34m'   # Dk Blue #0B64DD
+
+  # Elastic logo mark — 6 coloured segments forming the "e" shape.
+  # The right side is open (gap on lines 4-5) creating the "e" / "C" opening.
+  echo ""
+  echo -e "    ${LP}▄${LY}████████████████████${LD}▄▄${NC}"
+  echo -e "   ${LB}▐${LY}██████████████████████${LD}▌▌${NC}"
+  echo -e "   ${LB}▐▐${NC}                    ${LD}▐▌${NC}"
+  echo -e "   ${LB}▐▐▐${NC}"
+  echo -e "   ${LB}▐▐▐${NC}"
+  echo -e "   ${LB}▐▐${LT}██████████████████████${LG}▌▌${NC}"
+  echo -e "   ${LB}▐${LT}████████████████████████${LG}▌${NC}"
+  echo -e "    ${LT}▀▀████████████████████${LG}▀▀${NC}"
+  echo ""
+  echo -e "  ${DIM}  Elastic Stack On-Prem Installer — interactive setup${NC}"
   echo ""
 }
 
@@ -651,7 +662,7 @@ is_configured() {
 # Otherwise prompts the user to enter it manually.
 recover_es_password() {
   # Scan previous logs (excluding the current one) newest-first
-  local prev_log recovered
+  local prev_log recovered=""
   while IFS= read -r prev_log; do
     recovered=$(grep "CREDENTIAL: elastic_password" "$prev_log" 2>/dev/null \
       | tail -1 | sed 's/.*=//' || true)
