@@ -957,23 +957,73 @@ setup_kibana_enrollment() {
 setup_fleet_server() {
   step "Configuring Fleet Server"
 
-  local es_url
+  local es_url kibana_url
   [[ "$INSTALL_ES" == true ]] && es_url="https://localhost:9200" || es_url="${ES_EXTERNAL_URL}"
+  kibana_url="http://localhost:5601"
 
   local ca_cert="/etc/elasticsearch/certs/http_ca.crt"
 
-  # Generate a Fleet Server service token via the ES API
+  # Resolve bind address to a real IP for the Fleet Server URL.
+  # Agents need a routable address — 0.0.0.0 is not valid as a URL.
+  local host_ip
+  host_ip=$(hostname -I | awk '{print $1}')
+  local fleet_display_host="$FLEET_HOST"
+  if [[ "$fleet_display_host" == "0.0.0.0" ]]; then fleet_display_host="$host_ip"; fi
+  local fleet_url="https://${fleet_display_host}:8220"
+
+  # ── Step 1: Initialize Fleet in Kibana ──────────────────────────────────────
+  # This creates the Fleet Server integration policy and default agent policy.
+  # Without this call the Fleet UI shows "Add a Fleet Server" indefinitely.
+  info "Initializing Fleet in Kibana..."
+  local setup_resp
+  setup_resp=$(curl -sk -X POST "${kibana_url}/api/fleet/setup" \
+    -u "elastic:${ES_PASSWORD}" \
+    -H "kbn-xsrf: true" \
+    -H "Content-Type: application/json" 2>>"$LOG_FILE") || true
+  log "Fleet setup response: ${setup_resp}"
+  success "Fleet initialized in Kibana"
+
+  # ── Step 2: Register Fleet Server host ──────────────────────────────────────
+  # Tells Kibana and enrolling agents where Fleet Server lives.
+  info "Registering Fleet Server host: ${fleet_url}..."
+  curl -sk -X PUT "${kibana_url}/api/fleet/settings" \
+    -u "elastic:${ES_PASSWORD}" \
+    -H "kbn-xsrf: true" \
+    -H "Content-Type: application/json" \
+    -d "{\"fleet_server_hosts\": [\"${fleet_url}\"]}" >> "$LOG_FILE" 2>&1 || true
+
+  # ── Step 3: Configure Elasticsearch output with CA fingerprint ──────────────
+  # Fleet agents verify the ES TLS cert using this fingerprint.
+  if [[ -f "$ca_cert" ]]; then
+    local fingerprint
+    fingerprint=$(openssl x509 -fingerprint -sha256 -noout -in "$ca_cert" 2>/dev/null \
+      | sed 's/.*=//; s/://g; y/ABCDEF/abcdef/') || true
+    if [[ -n "$fingerprint" ]]; then
+      info "Configuring Elasticsearch output with CA fingerprint..."
+      curl -sk -X PUT "${kibana_url}/api/fleet/outputs/fleet-default-output" \
+        -u "elastic:${ES_PASSWORD}" \
+        -H "kbn-xsrf: true" \
+        -H "Content-Type: application/json" \
+        -d "{\"name\":\"default\",\"type\":\"elasticsearch\",\"hosts\":[\"${es_url}\"],\"is_default\":true,\"is_default_monitoring\":true,\"ca_trusted_fingerprint\":\"${fingerprint}\"}" \
+        >> "$LOG_FILE" 2>&1 || true
+    fi
+  fi
+
+  # ── Step 4: Generate Fleet Server service token ──────────────────────────────
   info "Generating Fleet Server service token..."
-  local token_json token
+  local token_json token token_name
+  token_name="fleet-server-token-$(date +%s)"
   token_json=$(curl -sk -X POST \
-    "${es_url}/_security/service/elastic/fleet-server/credential/token/fleet-server-token" \
+    "${es_url}/_security/service/elastic/fleet-server/credential/token/${token_name}" \
     -u "elastic:${ES_PASSWORD}" \
     -H "Content-Type: application/json" 2>>"$LOG_FILE") || true
 
-  token=$(echo "$token_json" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('token',{}).get('value',''))" 2>/dev/null || true)
+  token=$(echo "$token_json" | python3 -c \
+    "import sys,json; d=json.load(sys.stdin); print(d.get('token',{}).get('value',''))" \
+    2>/dev/null || true)
 
   if [[ -z "$token" ]]; then
-    warn "Could not auto-generate Fleet Server service token."
+    warn "Could not generate Fleet Server service token."
     warn "To complete Fleet Server setup manually:"
     warn "  1. In Kibana → Fleet → Settings → Add Fleet Server"
     warn "  2. Run the enrollment command shown in the UI"
@@ -984,12 +1034,11 @@ setup_fleet_server() {
   log "CREDENTIAL: fleet_service_token=${token}"
   success "Service token generated"
 
-  info "Enrolling elastic-agent as Fleet Server..."
+  # ── Step 5: Enroll elastic-agent as Fleet Server ─────────────────────────────
+  # elastic-agent was installed via the package manager — use 'enroll', not 'install'.
   local ca_flag=""
   if [[ -f "$ca_cert" ]]; then ca_flag="--fleet-server-es-ca=${ca_cert}"; fi
 
-  # elastic-agent was installed via package manager, so use 'enroll' (not 'install')
-  # 'install' is for tarball deployments where the agent isn't already on the system.
   # shellcheck disable=SC2086
   if run_with_spinner "Enrolling elastic-agent as Fleet Server" \
       elastic-agent enroll \
