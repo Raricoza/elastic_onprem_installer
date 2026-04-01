@@ -1193,40 +1193,74 @@ setup_fleet_server() {
   local fleet_url="https://${fleet_host}:8220"
 
   # ── Step 1: Initialize Fleet in Kibana ──────────────────────────────────────
-  # This creates the Fleet Server integration policy and default agent policy.
-  # Without this call the Fleet UI shows "Add a Fleet Server" indefinitely.
-  info "Initializing Fleet in Kibana..."
-  local setup_resp
-  setup_resp=$(curl -sk -X POST "${kibana_url}/api/fleet/setup" \
-    -u "elastic:${ES_PASSWORD}" \
-    -H "kbn-xsrf: true" \
-    -H "Content-Type: application/json" 2>>"$LOG_FILE") || true
-  log "Fleet setup response: ${setup_resp}"
-  success "Fleet initialized in Kibana"
+  # Retry until isInitialized=true — Kibana can be "available" at the status
+  # level while Fleet's internal bootstrap is still running.
+  info "Initializing Fleet in Kibana (waiting for isInitialized)..."
+  local setup_resp setup_ok=false
+  local fleet_retries=24 fleet_elapsed=0
+  while [[ $fleet_retries -gt 0 ]]; do
+    setup_resp=$(curl -sk -X POST "${kibana_url}/api/fleet/setup" \
+      -u "elastic:${ES_PASSWORD}" \
+      -H "kbn-xsrf: true" \
+      -H "Content-Type: application/json" 2>>"$LOG_FILE") || true
+    log "Fleet setup response: ${setup_resp}"
+    if echo "$setup_resp" | grep -q '"isInitialized":true'; then
+      setup_ok=true
+      break
+    fi
+    printf "\r  ${CYAN}[●]${NC} Fleet not yet initialized... ${DIM}%ds${NC}" "$fleet_elapsed"
+    sleep 5
+    (( fleet_retries-- )) || true
+    (( fleet_elapsed += 5 )) || true
+  done
+  printf "\r%-80s\r" ""
+  if [[ "$setup_ok" == true ]]; then
+    success "Fleet initialized in Kibana"
+  else
+    warn "Fleet initialization did not confirm isInitialized — check ${LOG_FILE}"
+    warn "Fleet setup response was: ${setup_resp}"
+  fi
 
   # ── Step 2: Register Fleet Server host ──────────────────────────────────────
-  # Tells Kibana and enrolling agents where Fleet Server lives.
   info "Registering Fleet Server host: ${fleet_url}..."
-  curl -sk -X PUT "${kibana_url}/api/fleet/settings" \
+  local settings_resp
+  settings_resp=$(curl -sk -X PUT "${kibana_url}/api/fleet/settings" \
     -u "elastic:${ES_PASSWORD}" \
     -H "kbn-xsrf: true" \
     -H "Content-Type: application/json" \
-    -d "{\"fleet_server_hosts\": [\"${fleet_url}\"]}" >> "$LOG_FILE" 2>&1 || true
+    -d "{\"fleet_server_hosts\": [\"${fleet_url}\"]}" 2>>"$LOG_FILE") || true
+  log "Fleet settings response: ${settings_resp}"
 
   # ── Step 3: Configure Elasticsearch output with CA fingerprint ──────────────
-  # Fleet agents verify the ES TLS cert using this fingerprint.
+  # Fetch the default output's real ID (varies by version) then PUT to it.
   if [[ -f "$ca_cert" ]]; then
     local fingerprint
     fingerprint=$(openssl x509 -fingerprint -sha256 -noout -in "$ca_cert" 2>/dev/null \
       | sed 's/.*=//; s/://g; y/ABCDEF/abcdef/') || true
     if [[ -n "$fingerprint" ]]; then
       info "Configuring Elasticsearch output with CA fingerprint..."
-      curl -sk -X PUT "${kibana_url}/api/fleet/outputs/fleet-default-output" \
+
+      # Resolve the actual default output ID — it is not always "fleet-default-output"
+      local outputs_resp default_output_id
+      outputs_resp=$(curl -sk "${kibana_url}/api/fleet/outputs" \
+        -u "elastic:${ES_PASSWORD}" \
+        -H "kbn-xsrf: true" 2>>"$LOG_FILE") || true
+      default_output_id=$(echo "$outputs_resp" | python3 -c \
+        "import sys,json
+items=json.load(sys.stdin).get('items',[])
+d=[x for x in items if x.get('is_default')]
+print(d[0]['id'] if d else 'fleet-default-output')" 2>/dev/null || true)
+      : "${default_output_id:=fleet-default-output}"
+      log "Fleet default output ID: ${default_output_id}"
+
+      local output_resp
+      output_resp=$(curl -sk -X PUT "${kibana_url}/api/fleet/outputs/${default_output_id}" \
         -u "elastic:${ES_PASSWORD}" \
         -H "kbn-xsrf: true" \
         -H "Content-Type: application/json" \
         -d "{\"name\":\"default\",\"type\":\"elasticsearch\",\"hosts\":[\"${es_url_agents}\"],\"is_default\":true,\"is_default_monitoring\":true,\"ca_trusted_fingerprint\":\"${fingerprint}\"}" \
-        >> "$LOG_FILE" 2>&1 || true
+        2>>"$LOG_FILE") || true
+      log "Fleet output response: ${output_resp}"
     fi
   fi
 
@@ -1249,7 +1283,7 @@ setup_fleet_server() {
       warn "To complete Fleet Server setup manually:"
       warn "  1. In Kibana → Fleet → Settings → Add Fleet Server"
       warn "  2. Run the enrollment command shown in the UI"
-      return
+      return 0
     fi
 
     FLEET_SERVICE_TOKEN="$token"
@@ -1257,17 +1291,20 @@ setup_fleet_server() {
     success "Service token generated"
 
     # ── Step 5: Enroll elastic-agent as Fleet Server ───────────────────────────
-    # elastic-agent was installed via the package manager — use 'enroll', not 'install'.
+    # Package-based install: use 'enroll' (not 'install').
+    # Pass --kibana-url so the agent can register the Fleet Server policy in Kibana.
     local ca_flag=""
     if [[ -f "$ca_cert" ]]; then ca_flag="--fleet-server-es-ca=${ca_cert}"; fi
 
     # shellcheck disable=SC2086
     if run_with_spinner "Enrolling elastic-agent as Fleet Server" \
         elastic-agent enroll \
+          --url="${fleet_url}" \
           --fleet-server-es="${es_url_internal}" \
           --fleet-server-service-token="${token}" \
           --fleet-server-host="${fleet_host}" \
           --fleet-server-port=8220 \
+          --kibana-url="${kibana_url}" \
           $ca_flag \
           --non-interactive; then
       success "Fleet Server enrolled"
