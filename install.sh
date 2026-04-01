@@ -1174,14 +1174,17 @@ setup_kibana_enrollment() {
 }
 
 setup_fleet_server() {
-  # Skip enrollment if elastic-agent is already running as Fleet Server.
-  # Fleet setup (Kibana API calls) still runs so settings stay current.
+  # Determine whether Fleet Server is already up by checking port 8220.
+  # Checking elastic-agent status text is unreliable — a freshly installed
+  # but unconfigured agent also shows "degraded", causing false positives.
   local agent_already_enrolled=false
-  if systemctl is-active --quiet elastic-agent 2>/dev/null; then
-    if elastic-agent status 2>/dev/null | grep -qi "fleet-server\|healthy\|degraded"; then
-      info "elastic-agent already enrolled — skipping enrollment step"
-      agent_already_enrolled=true
-    fi
+  local host_ip_check
+  host_ip_check=$(hostname -I | awk '{print $1}')
+  local fleet_host_check="$FLEET_HOST"
+  if [[ "$fleet_host_check" == "0.0.0.0" ]]; then fleet_host_check="$host_ip_check"; fi
+  if curl -sk "https://${fleet_host_check}:8220/api/status" -o /dev/null 2>/dev/null; then
+    info "Fleet Server already responding on :8220 — skipping enrollment"
+    agent_already_enrolled=true
   fi
 
   step "Configuring Fleet Server"
@@ -1242,14 +1245,34 @@ setup_fleet_server() {
   fi
 
   # ── Step 2: Register Fleet Server host ──────────────────────────────────────
+  # In Elastic 9.x the fleet_server_hosts field was removed from PUT /api/fleet/settings.
+  # Fleet Server hosts are now a first-class resource at /api/fleet/fleet_server_hosts.
   info "Registering Fleet Server host: ${fleet_url}..."
-  local settings_resp
-  settings_resp=$(curl -sk -X PUT "${kibana_url}/api/fleet/settings" \
+  local fsh_list_resp default_fsh_id
+  fsh_list_resp=$(curl -sk "${kibana_url}/api/fleet/fleet_server_hosts" \
     -u "elastic:${ES_PASSWORD}" \
-    -H "kbn-xsrf: true" \
-    -H "Content-Type: application/json" \
-    -d "{\"fleet_server_hosts\": [\"${fleet_url}\"]}" 2>>"$LOG_FILE") || true
-  log "Fleet settings response: ${settings_resp}"
+    -H "kbn-xsrf: true" 2>>"$LOG_FILE") || true
+  default_fsh_id=$(echo "$fsh_list_resp" | python3 -c \
+    "import sys,json; items=json.load(sys.stdin).get('items',[]); d=[x for x in items if x.get('is_default')]; print(d[0]['id'] if d else '')" \
+    2>/dev/null || true)
+  log "Existing default Fleet Server host ID: '${default_fsh_id}'"
+
+  local fsh_body="{\"name\":\"Default Fleet Server\",\"host_urls\":[\"${fleet_url}\"],\"is_default\":true}"
+  local fsh_resp
+  if [[ -n "$default_fsh_id" ]]; then
+    fsh_resp=$(curl -sk -X PUT "${kibana_url}/api/fleet/fleet_server_hosts/${default_fsh_id}" \
+      -u "elastic:${ES_PASSWORD}" \
+      -H "kbn-xsrf: true" \
+      -H "Content-Type: application/json" \
+      -d "$fsh_body" 2>>"$LOG_FILE") || true
+  else
+    fsh_resp=$(curl -sk -X POST "${kibana_url}/api/fleet/fleet_server_hosts" \
+      -u "elastic:${ES_PASSWORD}" \
+      -H "kbn-xsrf: true" \
+      -H "Content-Type: application/json" \
+      -d "$fsh_body" 2>>"$LOG_FILE") || true
+  fi
+  log "Fleet Server host response: ${fsh_resp}"
 
   # ── Step 3: Configure Elasticsearch output with CA fingerprint ──────────────
   # Fetch the default output's real ID (varies by version) then PUT to it.
@@ -1311,8 +1334,12 @@ print(d[0]['id'] if d else 'fleet-default-output')" 2>/dev/null || true)
     success "Service token generated"
 
     # ── Step 5: Enroll elastic-agent as Fleet Server ───────────────────────────
-    # Package-based install: use 'enroll' (not 'install').
-    # Pass --kibana-url so the agent can register the Fleet Server policy in Kibana.
+    # Package install auto-starts elastic-agent in an unconfigured state.
+    # Stop it before enrolling so the process does not conflict.
+    info "Stopping elastic-agent before enrollment..."
+    systemctl stop elastic-agent >> "$LOG_FILE" 2>&1 || true
+    sleep 2
+
     local ca_flag=""
     if [[ -f "$ca_cert" ]]; then ca_flag="--fleet-server-es-ca=${ca_cert}"; fi
 
@@ -1324,7 +1351,7 @@ print(d[0]['id'] if d else 'fleet-default-output')" 2>/dev/null || true)
           --fleet-server-service-token="${token}" \
           --fleet-server-host="${fleet_host}" \
           --fleet-server-port=8220 \
-          --kibana-url="${kibana_url}" \
+          --force \
           $ca_flag \
           --non-interactive; then
       success "Fleet Server enrolled"
