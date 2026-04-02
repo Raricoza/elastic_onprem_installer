@@ -48,6 +48,7 @@ INITIAL_MASTERS=()
 
 KIBANA_ENROLLMENT_TOKEN=""  # captured after enrollment token is generated
 KIBANA_ENC_KEY=""           # generated during configure_kibana; re-applied after enrollment
+AGENT_TARBALL_DIR=""        # path to extracted tarball dir; set by install_fleet()
 
 ES_LOCAL_URL=""             # https://<bound-ip>:9200  — set in main() after menu_network
 KIBANA_LOCAL_URL=""         # http://<bound-ip>:5601   — set in main() after menu_network
@@ -91,43 +92,26 @@ run_with_spinner() {
 }
 
 banner() {
-  printf "\033[97m                                    _~g@@@@@@@@@@@g__\n"
-  printf "\033[97m                                _o@@@D>\"\033[38;5;220m_gggggg__\033[97m\"=@@@@_\n"
-  printf "\033[97m                              _@@B\"\033[38;5;220mo@@@@@@@@@@@@@@@@g_\033[97m+@@@_\n"
-  printf "\033[97m               _g@@@@@@@@__ _@@P\033[38;5;220m_@@@@@@@@@@@@@@@@@@@@@@@_\033[97m@@@,\n"
-  printf "\033[97m             g@@D\"\033[38;5;205m~g@@ga\033[97m\"4@@@P\033[38;5;220m/@@@@@@@@@@@@@@@@@@@@@@@@@@@\033[97m'@@p\n"
-  printf "\033[97m           _@@\"\033[38;5;205mg@@@@@@@@@@\033[97m|@@\033[38;5;220m[@@@@@@@@@@@@@@@@@@@@@@@@@@@@@L\033[97mQ@@\n"
-  printf "\033[97m          ,@@\033[38;5;205m_@@@@@@@@@@@|\033[97m@@'\033[38;5;220m@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@l\033[97mQ@h\n"
-  printf "\033[97m          @@ \033[38;5;205m@@@@@@@@@@@@\033[97m,@@\033[38;5;220m!@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@,\033[97m@@,\n"
-  printf "\033[97m          @@\033[38;5;205m|@@@@@@@@@@@W\033[97m@@f\033[38;5;220m@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\033[97m[@@\n"
-  printf "\033[97m          9@,\033[38;5;205m@@@@@@@@@@@'\033[97m@@ \033[38;5;220m@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\033[97m'@@\n"
-  printf "\033[97m        _o@@@@@g~_\033[38;5;205m\"<B@@@\033[97m!@@\033[38;5;220m[@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\033[97m.@@\n"
-  printf "\033[97m     _g@@P\"\033[38;5;39mgg_\033[97m\"\"<8@@@@@@@@\"\033[38;5;220m@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\033[97m|@N\n"
-  printf "\033[97m    @@B\033[38;5;39m_@@@@@@@@@@@@@g_\033[97m\"f@@\033[38;5;220mT@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@B\033[97m_@@@@@g_\n"
-  printf "\033[97m  ,@@/\033[38;5;39m@@@@@@@@@@@@@@@@@@p\033[97m0@g\033[38;5;220mV@@@@@@@@@@@@@@@@@@@@@@@@@@@@P\033[97m_@@D\033[38;5;32m_@@_\033[97m<@@g\n"
-  printf "\033[97m .@@'\033[38;5;39m@@@@@@@@@@@@@@@@@@@@p\033[97m0@g\033[38;5;220mV@@@@@@@@@@@@@@@@@@@@@@@@@\"\033[97mg@@P\033[38;5;32m_@@@@@@@\033[97m'@@L\n"
-  printf "\033[97m @@F\033[38;5;39m@@@@@@@@@@@@@@@@@@@@@@*\033[97m@@@_\033[38;5;220m\"8@@@@@@@@@@@@@@@@@@@B\033[97m_@@@\"\033[38;5;32mg@@@@@@@@@@a\033[97m0@g\n"
-  printf "\033[97m @@ \033[38;5;39m@@@@@@@@@@@@@@@@@@@@\"\033[97mg@@>\"8@@@g_\033[38;5;220m<@@@@@@@@@@@@@P\033[97m_@@D\033[38;5;32m_@@@@@@@@@@@@@@a\033[97m@@1\n"
-  printf "\033[97m @@,\033[38;5;39m@@@@@@@@@@@@@@@@@@\033[97m_@@@\"\033[38;5;37m@@@@@p\033[97m\"4@@@@_\033[38;5;220m\"0@@@@@@\"\033[97mg@@F\033[38;5;32mo@@@@@@@@@@@@@@@@@\033[97m'@@\n"
-  printf "\033[97m 7@@\033[38;5;39m[@@@@@@@@@@@@@@P\033[97m_@@D\033[38;5;37m_@@@@@@@@@@@g_\033[97m<B@@@g_\033[38;5;220m<\033[97m_@@@\"\033[38;5;32mg@@@@@@@@@@@@@@@@@@@ \033[97m@@\n"
-  printf "\033[97m  @@a\033[38;5;39m0@@@@@@@@@@@P\033[97mo@@P\033[38;5;37m_@@@@@@@@@@@@@@@@@@a\033[97m\"4@@@Q\033[38;5;32m_@@@@@@@@@@@@@@@@@@@@@@\033[97m,@@\n"
-  printf "\033[97m   Q@g\033[38;5;39m\\@@@@@@@@\"\033[97mg@@\"\033[38;5;37mg@@@@@@@@@@@@@@@@@@@@@@@@\033[97m'@@,\033[38;5;32m@@@@@@@@@@@@@@@@@@@@@F\033[97m@@F\n"
-  printf "\033[97m    \"@@g\033[38;5;39m\"@@@B\033[97m_@@B\"\033[38;5;37m@@@@@@@@@@@@@@@@@@@@@@@@@@@@,\033[97m@@,\033[38;5;32m@@@@@@@@@@@@@@@@@@@F\033[97mg@P\n"
-  printf "\033[97m      '4@@gp@@P\033[38;5;37m_@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@,\033[97m@@L\033[38;5;32mB@@@@@@@@@@@@@@@B\033[97m_@@F\n"
-  printf "\033[97m          T@W\033[38;5;37m_@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@ \033[97m@@@@@@g_\033[38;5;32m\"\"=B@@@B>\033[97m~@@P\n"
-  printf "\033[97m          [@|\033[38;5;37m@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\033[97m|@@\033[38;5;112mgg_\033[97m\"<4B@@@@@@@@D\"\n"
-  printf "\033[97m          @@|\033[38;5;37m@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@|\033[97m@@'\033[38;5;112m@@@@@@@@@g~\033[97m\\@g\n"
-  printf "\033[97m          [@]\033[38;5;37m@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\033[97m,@@\033[38;5;112m|@@@@@@@@@@@|\033[97m@@\n"
-  printf "\033[97m           @@\033[38;5;37m!@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@W\033[97m@@|\033[38;5;112m@@@@@@@@@@@@;\033[97m@@\n"
-  printf "\033[97m           @@A\033[38;5;37m@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@;\033[97m@@ \033[38;5;112m@@@@@@@@@@@W\033[97m{@W\n"
-  printf "\033[97m            @@L\033[38;5;37mQ@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\033[97m!@@\033[38;5;112m[@@@@@@@@@@F\033[97mg@@\n"
-  printf "\033[97m             Q@g\033[38;5;37m\\@@@@@@@@@@@@@@@@@@@@@@@@@@@@\"\033[97m@@g_\033[38;5;112m0@@@@@@D\"\033[97mg@@P\n"
-  printf "\033[97m              <@@_\033[38;5;37m\\@@@@@@@@@@@@@@@@@@@@@@@@F\033[97mg@W \"B@@@@@@@@@D\"\n"
-  printf "\033[97m                \\@@g\033[38;5;37m\"8@@@@@@@@@@@@@@@@@@D\033[97m_@@@'       \`\"\n"
-  printf "\033[97m                  \"@@@g_\033[38;5;37m\"4@@@@@@@@@BP\"\033[97m_@@@P\n"
-  printf "\033[97m                     '+@@@@@@@@@@@@@@@D\"\n"
   printf "\033[0m\n"
-  echo -e "  \033[2m  Elastic Stack On-Prem Installer\033[0m"
+  printf "\033[97m                   _____\n"
+  printf "\033[97m               _gP\"\033[38;5;220m_ggg_\033[97m\"4g_\n"
+  printf "\033[97m       _mD=B__@\033[38;5;220m_@@@@@@@@@@@_\033[97m@,\n"
+  printf "\033[97m     ,P\033[38;5;205mo@@@@|\033[97m@\033[38;5;220m[@@@@@@@@@@@@@g\033[97mT\\\\\n"
+  printf "\033[97m     @\033[38;5;205m{@@@@@\033[97m;/\033[38;5;220m@@@@@@@@@@@@@@@g\033[97m@\n"
+  printf "\033[97m     \$_\033[38;5;205m\"=B@W\033[97m@\033[38;5;220m;@@@@@@@@@@@@@@@@\033[97m[\n"
+  printf "\033[97m  _D\033[38;5;39m_@@g_\033[97m\"\"=@\033[38;5;220mf@@@@@@@@@@@@@@@\"\033[97m@L\n"
+  printf "\033[97m J/\033[38;5;39m@@@@@@@@@\033[97m'g\033[38;5;220m9@@@@@@@@@@@B\033[97m_B\033[38;5;32m_@@_\033[97mQ,\n"
+  printf "\033[97m @\033[38;5;39m@@@@@@@@@B\033[97m_B+q_\033[38;5;220m<@@@@@@P\033[97m_P\033[38;5;32m_@@@@@@\033[97mV,\n"
+  printf "\033[97m @\033[38;5;39m[@@@@@@P\033[97m_P\033[38;5;37m_@@@g_\033[97m<B_\033[38;5;220m\"\"\033[97mg\"\033[38;5;32mg@@@@@@@@,\033[97m@\n"
+  printf "\033[97m \`q\033[38;5;39m\\\\@@@F\033[97maF\033[38;5;37mg@@@@@@@@@@p\033[97m%%\033[38;5;32m'@@@@@@@@@@\033[97m//\n"
+  printf "\033[97m   \"%%_@\"\033[38;5;37m@@@@@@@@@@@@@@g\033[97mt_\033[38;5;32m4B@@@@@P\033[97m/F\n"
+  printf "\033[97m     @\033[38;5;37m|@@@@@@@@@@@@@@@@\033[97m;F\033[38;5;112m_\033[97m\"\"4DgD\"\n"
+  printf "\033[97m     9\033[38;5;37m'@@@@@@@@@@@@@@@W\033[97m@\033[38;5;112m!@@@@@\033[97m|,\n"
+  printf "\033[97m      g\033[38;5;37m0@@@@@@@@@@@@@@'\033[97mN\033[38;5;112m@@@@@P\033[97m@\n"
+  printf "\033[97m      '@\033[38;5;37m\"@@@@@@@@@@@@P\033[97mgq\033[38;5;112m\"<*\"\033[97m~P\n"
+  printf "\033[97m        \"q_\033[38;5;37m4@@@@@@P\"\033[97md\"\n"
+  printf "\033[97m           '<=BB=>\"\n"
+  printf "\033[0m\n"
   echo ""
 }
 
@@ -713,6 +697,16 @@ recover_es_password() {
 }
 
 # ── Install helpers ───────────────────────────────────────────────────────────
+
+# Maps uname -m output to Elastic's tarball architecture label.
+get_agent_arch() {
+  case "$(uname -m)" in
+    x86_64)        echo "x86_64" ;;
+    aarch64|arm64) echo "arm64"  ;;
+    *)             echo "x86_64" ;;
+  esac
+}
+
 _pkg_install_inner() {
   local pkg="$1"
   if [[ "$OS_FAMILY" == "debian" ]]; then
@@ -751,13 +745,30 @@ install_kibana() {
 }
 
 install_fleet() {
-  if is_pkg_installed "elastic-agent"; then
-    info "Elastic Agent already installed — skipping package install"
-    return
-  fi
-  step "Installing Elastic Agent ${ELASTIC_VERSION}"
-  pkg_install "elastic-agent"
-  success "Elastic Agent installed"
+  # Download the Elastic Agent tarball for the current architecture.
+  # We use the tarball installer (not the APT/YUM package) because the package
+  # defaults to the 'basic' flavor which omits Fleet Server.  The tarball
+  # installer supports --install-servers which unpacks the servers flavor.
+  step "Downloading Elastic Agent ${ELASTIC_VERSION}"
+
+  local arch tarball url tmpdir
+  arch=$(get_agent_arch)
+  tarball="elastic-agent-${ELASTIC_VERSION}-linux-${arch}.tar.gz"
+  url="https://artifacts.elastic.co/downloads/beats/elastic-agent/${tarball}"
+  tmpdir=$(mktemp -d)
+
+  info "Architecture: ${arch} — fetching ${url}"
+  run_with_spinner "Downloading elastic-agent ${ELASTIC_VERSION}" \
+    curl -L -o "${tmpdir}/${tarball}" "$url" \
+    || die "Failed to download Elastic Agent tarball — check ${LOG_FILE}"
+
+  run_with_spinner "Extracting elastic-agent" \
+    tar xzf "${tmpdir}/${tarball}" -C "$tmpdir" \
+    || die "Failed to extract Elastic Agent tarball — check ${LOG_FILE}"
+
+  rm -f "${tmpdir}/${tarball}"
+  AGENT_TARBALL_DIR="${tmpdir}/elastic-agent-${ELASTIC_VERSION}-linux-${arch}"
+  success "Elastic Agent ready at ${AGENT_TARBALL_DIR}"
 }
 
 # ── Configuration ─────────────────────────────────────────────────────────────
@@ -1244,6 +1255,137 @@ setup_fleet_server() {
     warn "Fleet setup response was: ${setup_resp}"
   fi
 
+  # ── Step 1.5: Ensure Fleet Server policy exists with integration ────────────
+  # The Kibana GUI creates a Fleet Server agent policy and installs the
+  # fleet_server integration into it before running the install command.
+  # Without the integration in the policy the agent starts but Fleet Server
+  # never activates.  We replicate that here.
+  local fleet_policy_id=""
+
+  # Find the default Fleet Server policy (created by /api/fleet/setup).
+  local policy_list_resp
+  policy_list_resp=$(curl -sk \
+    "${kibana_url}/api/fleet/agent_policies?kuery=is_default_fleet_server%3Atrue" \
+    -u "elastic:${ES_PASSWORD}" \
+    -H "kbn-xsrf: true" 2>>"$LOG_FILE") || true
+  fleet_policy_id=$(echo "$policy_list_resp" | python3 -c \
+    "import sys,json; items=json.load(sys.stdin).get('items',[]); print(items[0]['id'] if items else '')" \
+    2>/dev/null || true)
+
+  if [[ -z "$fleet_policy_id" ]]; then
+    info "No default Fleet Server policy found — creating one..."
+    local create_policy_resp
+    create_policy_resp=$(curl -sk -X POST "${kibana_url}/api/fleet/agent_policies" \
+      -u "elastic:${ES_PASSWORD}" \
+      -H "kbn-xsrf: true" \
+      -H "Content-Type: application/json" \
+      -d '{"name":"Fleet Server policy","namespace":"default","is_default_fleet_server":true,"monitoring_enabled":["logs","metrics"]}' \
+      2>>"$LOG_FILE") || true
+    fleet_policy_id=$(echo "$create_policy_resp" | python3 -c \
+      "import sys,json; print(json.load(sys.stdin).get('item',{}).get('id',''))" \
+      2>/dev/null || true)
+    log "Created Fleet Server policy ID: ${fleet_policy_id}"
+  else
+    log "Fleet Server policy ID: ${fleet_policy_id}"
+    # Ensure monitoring is enabled on the existing policy.
+    curl -sk -X PUT "${kibana_url}/api/fleet/agent_policies/${fleet_policy_id}" \
+      -u "elastic:${ES_PASSWORD}" \
+      -H "kbn-xsrf: true" \
+      -H "Content-Type: application/json" \
+      -d "{\"monitoring_enabled\":[\"logs\",\"metrics\"]}" \
+      >> "$LOG_FILE" 2>&1 || true
+  fi
+
+  # Install the fleet_server integration into the policy if not already present.
+  if [[ -n "$fleet_policy_id" ]]; then
+    local pkg_policies_resp has_fleet_server_pkg
+    pkg_policies_resp=$(curl -sk \
+      "${kibana_url}/api/fleet/package_policies?kuery=policy_id:${fleet_policy_id}" \
+      -u "elastic:${ES_PASSWORD}" \
+      -H "kbn-xsrf: true" 2>>"$LOG_FILE") || true
+    has_fleet_server_pkg=$(echo "$pkg_policies_resp" | python3 -c \
+      "import sys,json
+items=json.load(sys.stdin).get('items',[])
+print('yes' if any(x.get('package',{}).get('name')=='fleet_server' for x in items) else '')" \
+      2>/dev/null || true)
+
+    if [[ -z "$has_fleet_server_pkg" ]]; then
+      info "Installing Fleet Server integration into policy..."
+      # Get the available fleet_server package version from Kibana's EPM.
+      local fs_pkg_version
+      fs_pkg_version=$(curl -sk "${kibana_url}/api/fleet/epm/packages/fleet_server" \
+        -u "elastic:${ES_PASSWORD}" \
+        -H "kbn-xsrf: true" 2>>"$LOG_FILE" | python3 -c \
+        "import sys,json; d=json.load(sys.stdin); print(d.get('item',d).get('version',''))" \
+        2>/dev/null || true)
+      : "${fs_pkg_version:=${ELASTIC_VERSION}}"
+      log "fleet_server package version: ${fs_pkg_version}"
+
+      local pkg_policy_body pkg_install_resp
+      pkg_policy_body=$(python3 -c "
+import json
+print(json.dumps({
+  'name': 'fleet_server-1',
+  'namespace': 'default',
+  'policy_id': '${fleet_policy_id}',
+  'enabled': True,
+  'inputs': [{'type': 'fleet-server', 'enabled': True, 'streams': [], 'vars': {}}],
+  'package': {'name': 'fleet_server', 'version': '${fs_pkg_version}'}
+}))")
+      pkg_install_resp=$(curl -sk -X POST "${kibana_url}/api/fleet/package_policies" \
+        -u "elastic:${ES_PASSWORD}" \
+        -H "kbn-xsrf: true" \
+        -H "Content-Type: application/json" \
+        -d "$pkg_policy_body" 2>>"$LOG_FILE") || true
+      log "Fleet Server integration install response: ${pkg_install_resp}"
+      success "Fleet Server integration installed in policy"
+    else
+      info "Fleet Server integration already present in policy"
+    fi
+
+    # Install the elastic_agent integration into the policy if not already present.
+    # This is what the GUI adds alongside fleet_server — it collects agent logs
+    # and metrics so the Fleet Server itself is monitored.
+    local has_elastic_agent_pkg
+    has_elastic_agent_pkg=$(echo "$pkg_policies_resp" | python3 -c \
+      "import sys,json
+items=json.load(sys.stdin).get('items',[])
+print('yes' if any(x.get('package',{}).get('name')=='elastic_agent' for x in items) else '')" \
+      2>/dev/null || true)
+
+    if [[ -z "$has_elastic_agent_pkg" ]]; then
+      info "Installing Elastic Agent integration into policy..."
+      local ea_pkg_version ea_pkg_body ea_pkg_resp
+      ea_pkg_version=$(curl -sk "${kibana_url}/api/fleet/epm/packages/elastic_agent" \
+        -u "elastic:${ES_PASSWORD}" \
+        -H "kbn-xsrf: true" 2>>"$LOG_FILE" | python3 -c \
+        "import sys,json; d=json.load(sys.stdin); print(d.get('item',d).get('version',''))" \
+        2>/dev/null || true)
+      : "${ea_pkg_version:=${ELASTIC_VERSION}}"
+      log "elastic_agent package version: ${ea_pkg_version}"
+
+      ea_pkg_body=$(python3 -c "
+import json
+print(json.dumps({
+  'name': 'elastic_agent-1',
+  'namespace': 'default',
+  'policy_id': '${fleet_policy_id}',
+  'enabled': True,
+  'inputs': [],
+  'package': {'name': 'elastic_agent', 'version': '${ea_pkg_version}'}
+}))")
+      ea_pkg_resp=$(curl -sk -X POST "${kibana_url}/api/fleet/package_policies" \
+        -u "elastic:${ES_PASSWORD}" \
+        -H "kbn-xsrf: true" \
+        -H "Content-Type: application/json" \
+        -d "$ea_pkg_body" 2>>"$LOG_FILE") || true
+      log "Elastic Agent integration install response: ${ea_pkg_resp}"
+      success "Elastic Agent integration installed in policy"
+    else
+      info "Elastic Agent integration already present in policy"
+    fi
+  fi
+
   # ── Step 2: Register Fleet Server host ──────────────────────────────────────
   # In Elastic 9.x the fleet_server_hosts field was removed from PUT /api/fleet/settings.
   # Fleet Server hosts are now a first-class resource at /api/fleet/fleet_server_hosts.
@@ -1333,30 +1475,41 @@ print(d[0]['id'] if d else 'fleet-default-output')" 2>/dev/null || true)
     log "CREDENTIAL: fleet_service_token=${token}"
     success "Service token generated"
 
-    # ── Step 5: Enroll elastic-agent as Fleet Server ───────────────────────────
-    # Package install auto-starts elastic-agent in an unconfigured state.
-    # Stop it before enrolling so the process does not conflict.
-    info "Stopping elastic-agent before enrollment..."
+    # ── Step 5: Install elastic-agent as Fleet Server via tarball ─────────────
+    # Using the tarball installer with --install-servers ensures the servers
+    # flavor is used, which includes Fleet Server.  The APT/YUM package defaults
+    # to 'basic' flavor and does not include Fleet Server.
+    if [[ -z "$AGENT_TARBALL_DIR" || ! -f "${AGENT_TARBALL_DIR}/elastic-agent" ]]; then
+      warn "Elastic Agent tarball not found — cannot install Fleet Server"
+      warn "Expected: ${AGENT_TARBALL_DIR}/elastic-agent"
+      return 0
+    fi
+
+    # Stop any previously installed elastic-agent service so it does not conflict.
+    info "Stopping any existing elastic-agent service..."
     systemctl stop elastic-agent >> "$LOG_FILE" 2>&1 || true
     sleep 2
 
     local ca_flag=""
     if [[ -f "$ca_cert" ]]; then ca_flag="--fleet-server-es-ca=${ca_cert}"; fi
 
+    # Fall back to the well-known default ID if the policy lookup above failed.
+    : "${fleet_policy_id:=fleet-server-policy}"
+
     # shellcheck disable=SC2086
-    if run_with_spinner "Enrolling elastic-agent as Fleet Server" \
-        elastic-agent enroll \
-          --url="${fleet_url}" \
+    if run_with_spinner "Installing elastic-agent as Fleet Server" \
+        "${AGENT_TARBALL_DIR}/elastic-agent" install \
           --fleet-server-es="${es_url_internal}" \
           --fleet-server-service-token="${token}" \
+          --fleet-server-policy="${fleet_policy_id}" \
           --fleet-server-host="${fleet_host}" \
           --fleet-server-port=8220 \
+          --install-servers \
           --force \
-          $ca_flag \
-          --non-interactive; then
-      success "Fleet Server enrolled"
+          $ca_flag; then
+      success "Fleet Server installed"
     else
-      warn "Fleet Server enrollment had issues — check: journalctl -u elastic-agent -n 50"
+      warn "Fleet Server installation had issues — check: journalctl -u elastic-agent -n 50"
     fi
   fi
 
