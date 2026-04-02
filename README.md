@@ -1,3 +1,6 @@
+
+<img width="1215" height="424" alt="elastic_ascii_banner" src="https://github.com/user-attachments/assets/f0e7e014-73e6-4ca5-a9e1-af8539971f2b" />
+
 # Elastic Stack On-Prem Installer
 
 An interactive, single-file bash installer for self-hosted Elastic Stack deployments on Linux.
