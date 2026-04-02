@@ -762,25 +762,40 @@ install_fleet() {
   # We use the tarball installer (not the APT/YUM package) because the package
   # defaults to the 'basic' flavor which omits Fleet Server.  The tarball
   # installer supports --install-servers which unpacks the servers flavor.
-  step "Downloading Elastic Agent ${ELASTIC_VERSION}"
+  #
+  # Tarballs are saved next to this script so they survive reboots and can be
+  # reused on subsequent runs without re-downloading.
+  step "Preparing Elastic Agent ${ELASTIC_VERSION}"
 
-  local arch tarball url tmpdir
+  local arch tarball tarball_path extract_dir
   arch=$(get_agent_arch)
   tarball="elastic-agent-${ELASTIC_VERSION}-linux-${arch}.tar.gz"
-  url="https://artifacts.elastic.co/downloads/beats/elastic-agent/${tarball}"
-  tmpdir=$(mktemp -d)
+  tarball_path="${SCRIPT_DIR}/${tarball}"
+  extract_dir="${SCRIPT_DIR}/elastic-agent-${ELASTIC_VERSION}-linux-${arch}"
+  AGENT_TARBALL_DIR="$extract_dir"
 
-  info "Architecture: ${arch} — fetching ${url}"
-  run_with_spinner "Downloading elastic-agent ${ELASTIC_VERSION}" \
-    curl -L -o "${tmpdir}/${tarball}" "$url" \
-    || die "Failed to download Elastic Agent tarball — check ${LOG_FILE}"
+  # Reuse an already-extracted directory if present.
+  if [[ -f "${extract_dir}/elastic-agent" ]]; then
+    info "Elastic Agent already extracted at ${extract_dir} — skipping download"
+    success "Elastic Agent ready at ${AGENT_TARBALL_DIR}"
+    return
+  fi
+
+  # Download only if the tarball is not already present.
+  if [[ -f "$tarball_path" ]]; then
+    info "Tarball already present at ${tarball_path} — skipping download"
+  else
+    local url="https://artifacts.elastic.co/downloads/beats/elastic-agent/${tarball}"
+    info "Architecture: ${arch} — fetching ${url}"
+    run_with_spinner "Downloading elastic-agent ${ELASTIC_VERSION}" \
+      curl -L -o "$tarball_path" "$url" \
+      || die "Failed to download Elastic Agent tarball — check ${LOG_FILE}"
+  fi
 
   run_with_spinner "Extracting elastic-agent" \
-    tar xzf "${tmpdir}/${tarball}" -C "$tmpdir" \
+    tar xzf "$tarball_path" -C "$SCRIPT_DIR" \
     || die "Failed to extract Elastic Agent tarball — check ${LOG_FILE}"
 
-  rm -f "${tmpdir}/${tarball}"
-  AGENT_TARBALL_DIR="${tmpdir}/elastic-agent-${ELASTIC_VERSION}-linux-${arch}"
   success "Elastic Agent ready at ${AGENT_TARBALL_DIR}"
 }
 
