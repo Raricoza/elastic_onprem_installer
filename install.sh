@@ -247,44 +247,57 @@ detect_os() {
 }
 
 # ── Prerequisite Checks ───────────────────────────────────────────────────────
-check_disk_space() {
-  local free_gb
-  free_gb=$(df -BG /var/lib 2>/dev/null | awk 'NR==2 { gsub(/G/,"",$4); print $4 }') || true
-  if [[ -n "$free_gb" && $free_gb -lt 20 ]]; then
-    warn "Only ${free_gb}GB free on /var/lib. Recommend at least 20GB."
-    confirm "Continue anyway?" "Y" || die "Aborted by user."
-  fi
-}
-
 check_prerequisites() {
   step "Checking prerequisites"
 
-  echo ""
-  if confirm "  Run full prerequisite checks (RAM, curl, systemd)?" "Y"; then
-    [[ $EUID -eq 0 ]] || die "This script must be run as root (or via sudo)."
+  [[ $EUID -eq 0 ]] || die "This script must be run as root (or via sudo)."
 
-    command -v systemctl &>/dev/null || die "systemd is required. SysV init is not supported."
+  command -v systemctl &>/dev/null || die "systemd is required. SysV init is not supported."
 
-    if ! command -v curl &>/dev/null; then
-      info "curl not found — installing..."
-      $PKG_MANAGER install -y curl >> "$LOG_FILE" 2>&1
-    fi
+  if ! command -v curl &>/dev/null; then
+    info "curl not found — installing..."
+    $PKG_MANAGER install -y curl >> "$LOG_FILE" 2>&1
+  fi
 
-    # RAM check (warn only)
-    local ram_mb
-    ram_mb=$(awk '/MemTotal/ { printf "%d", $2/1024 }' /proc/meminfo)
-    if [[ $ram_mb -lt 4096 ]]; then
-      warn "Only ${ram_mb}MB RAM detected. Elasticsearch recommends at least 4GB for a POC."
-      confirm "Continue anyway?" "Y" || die "Aborted by user."
-    else
-      success "RAM: ${ram_mb}MB — OK"
-    fi
+  local checks_passed=true
 
-    check_disk_space
-    success "Prerequisites OK"
+  # ── CPU cores ────────────────────────────────────────────────────────────────
+  local cpu_cores
+  cpu_cores=$(nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo 2>/dev/null || echo 0)
+  if [[ $cpu_cores -lt 8 ]]; then
+    warn "CPU: ${cpu_cores} core(s) detected — minimum recommended is 8 cores."
+    checks_passed=false
   else
-    info "Prerequisite checks skipped."
-    check_disk_space
+    success "CPU: ${cpu_cores} cores — OK"
+  fi
+
+  # ── RAM ──────────────────────────────────────────────────────────────────────
+  local ram_gb
+  ram_gb=$(awk '/MemTotal/ { printf "%d", $2/1024/1024 }' /proc/meminfo)
+  if [[ $ram_gb -lt 32 ]]; then
+    warn "RAM: ${ram_gb}GB detected — minimum recommended is 32GB."
+    checks_passed=false
+  else
+    success "RAM: ${ram_gb}GB — OK"
+  fi
+
+  # ── Disk space ───────────────────────────────────────────────────────────────
+  local free_gb
+  free_gb=$(df -BG /var/lib 2>/dev/null | awk 'NR==2 { gsub(/G/,"",$4); print $4 }') || true
+  if [[ -n "$free_gb" && $free_gb -lt 200 ]]; then
+    warn "Disk: ${free_gb}GB free on /var/lib — minimum recommended is 200GB."
+    checks_passed=false
+  else
+    success "Disk: ${free_gb}GB free on /var/lib — OK"
+  fi
+
+  # ── Prompt to continue if any check failed ───────────────────────────────────
+  if [[ "$checks_passed" == "false" ]]; then
+    echo ""
+    confirm "  System does not meet the recommended specifications. Continue anyway?" "N" \
+      || die "Aborted by user."
+  else
+    success "All prerequisite checks passed"
   fi
 }
 
