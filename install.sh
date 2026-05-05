@@ -55,6 +55,7 @@ KIBANA_LOCAL_URL=""         # http://<bound-ip>:5601   — set in main() after m
 
 OS_FAMILY=""                # rhel | debian
 PKG_MANAGER=""              # dnf | yum | apt-get
+ARCH=""                     # x86_64 | arm64 — set by detect_arch()
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_FILE="${SCRIPT_DIR}/elastic-install-$(date +%Y%m%d-%H%M%S).log"
@@ -244,6 +245,15 @@ detect_os() {
   fi
 
   success "Detected: ${os_id} ${os_version} (${OS_FAMILY} family) — using ${PKG_MANAGER}"
+}
+
+detect_arch() {
+  case "$(uname -m)" in
+    x86_64)        ARCH="x86_64" ;;
+    aarch64|arm64) ARCH="arm64"  ;;
+    *)             die "Unsupported architecture: $(uname -m). Only x86_64 and arm64 are supported." ;;
+  esac
+  success "Architecture: ${ARCH}"
 }
 
 # ── Prerequisite Checks ───────────────────────────────────────────────────────
@@ -711,14 +721,6 @@ recover_es_password() {
 
 # ── Install helpers ───────────────────────────────────────────────────────────
 
-# Maps uname -m output to Elastic's tarball architecture label.
-get_agent_arch() {
-  case "$(uname -m)" in
-    x86_64)        echo "x86_64" ;;
-    aarch64|arm64) echo "arm64"  ;;
-    *)             echo "x86_64" ;;
-  esac
-}
 
 _pkg_install_inner() {
   local pkg="$1"
@@ -767,11 +769,10 @@ install_fleet() {
   # reused on subsequent runs without re-downloading.
   step "Preparing Elastic Agent ${ELASTIC_VERSION}"
 
-  local arch tarball tarball_path extract_dir
-  arch=$(get_agent_arch)
-  tarball="elastic-agent-${ELASTIC_VERSION}-linux-${arch}.tar.gz"
+  local tarball tarball_path extract_dir
+  tarball="elastic-agent-${ELASTIC_VERSION}-linux-${ARCH}.tar.gz"
   tarball_path="${SCRIPT_DIR}/${tarball}"
-  extract_dir="${SCRIPT_DIR}/elastic-agent-${ELASTIC_VERSION}-linux-${arch}"
+  extract_dir="${SCRIPT_DIR}/elastic-agent-${ELASTIC_VERSION}-linux-${ARCH}"
   AGENT_TARBALL_DIR="$extract_dir"
 
   # Reuse an already-extracted directory if present.
@@ -786,7 +787,7 @@ install_fleet() {
     info "Tarball already present at ${tarball_path} — skipping download"
   else
     local url="https://artifacts.elastic.co/downloads/beats/elastic-agent/${tarball}"
-    info "Architecture: ${arch} — fetching ${url}"
+    info "Architecture: ${ARCH} — fetching ${url}"
     run_with_spinner "Downloading elastic-agent ${ELASTIC_VERSION}" \
       curl -L -o "$tarball_path" "$url" \
       || die "Failed to download Elastic Agent tarball — check ${LOG_FILE}"
@@ -1660,6 +1661,7 @@ main() {
   echo ""
 
   detect_os
+  detect_arch
   check_prerequisites
 
   echo ""
