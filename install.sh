@@ -31,6 +31,9 @@ TOPOLOGY="single"           # single | multi
 NODE_ROLE="master_data"     # master_data | master | data | coordinating
 CLUSTER_NAME="elastic-poc"
 NODE_NAME=""
+
+ES_DATA_DIR="/var/lib/elasticsearch"
+ES_LOG_DIR="/var/log/elasticsearch"
 NETWORK_HOST="0.0.0.0"     # Elasticsearch network.host
 KIBANA_HOST="0.0.0.0"      # Kibana server.host
 FLEET_HOST="0.0.0.0"       # Fleet Server bind address
@@ -527,6 +530,29 @@ menu_multi_node() {
   fi
 }
 
+menu_single_node() {
+  step "Server name"
+  echo ""
+  prompt "Cluster name" "$CLUSTER_NAME"
+  CLUSTER_NAME="$REPLY"
+  prompt "Node name" "$(hostname -s)"
+  NODE_NAME="$REPLY"
+  success "Cluster: ${CLUSTER_NAME}  /  Node: ${NODE_NAME}"
+}
+
+menu_data_dirs() {
+  if [[ "$INSTALL_ES" == false ]]; then return; fi
+  step "Elasticsearch data and log directories"
+  echo ""
+  info "Where should Elasticsearch store its data and write its logs?"
+  echo ""
+  prompt "Data directory" "$ES_DATA_DIR"
+  ES_DATA_DIR="$REPLY"
+  prompt "Log directory" "$ES_LOG_DIR"
+  ES_LOG_DIR="$REPLY"
+  success "Data: ${ES_DATA_DIR}   /   Logs: ${ES_LOG_DIR}"
+}
+
 menu_network() {
   step "Network binding"
   echo ""
@@ -592,6 +618,13 @@ menu_confirm() {
     if [[ ${#INITIAL_MASTERS[@]} -gt 0 ]]; then
       echo -e "  ${BOLD}Init masters:${NC} $(IFS=', '; echo "${INITIAL_MASTERS[*]}")"
     fi
+  fi
+
+  if [[ "$INSTALL_ES" == true ]]; then
+    echo ""
+    echo -e "  ${BOLD}ES paths:${NC}"
+    echo -e "    Data:  ${ES_DATA_DIR}"
+    echo -e "    Logs:  ${ES_LOG_DIR}"
   fi
 
   echo ""
@@ -832,8 +865,8 @@ cluster.name: ${CLUSTER_NAME}
 node.name: ${NODE_NAME}
 
 # Paths
-path.data: /var/lib/elasticsearch
-path.logs: /var/log/elasticsearch
+path.data: ${ES_DATA_DIR}
+path.logs: ${ES_LOG_DIR}
 
 # Network
 network.host: ${NETWORK_HOST}
@@ -892,8 +925,8 @@ cluster.name: ${CLUSTER_NAME}
 node.name: ${NODE_NAME}
 
 # Paths
-path.data: /var/lib/elasticsearch
-path.logs: /var/log/elasticsearch
+path.data: ${ES_DATA_DIR}
+path.logs: ${ES_LOG_DIR}
 
 # Network
 network.host: ${NETWORK_HOST}
@@ -919,6 +952,11 @@ xpack.security.http.ssl:
   keystore.path: certs/http.p12
 EOF
   fi
+
+  # Ensure data and log directories exist with correct ownership
+  mkdir -p "$ES_DATA_DIR" "$ES_LOG_DIR"
+  chown elasticsearch:elasticsearch "$ES_DATA_DIR" "$ES_LOG_DIR"
+  log "Directories: data=${ES_DATA_DIR} logs=${ES_LOG_DIR}"
 
   open_firewall_port 9200
   if [[ "$TOPOLOGY" == "multi" ]]; then open_firewall_port 9300; fi
@@ -1534,6 +1572,7 @@ print(d[0]['id'] if d else 'fleet-default-output')" 2>/dev/null || true)
           --fleet-server-host="${fleet_host}" \
           --fleet-server-port=8220 \
           --install-servers \
+          --insecure \
           --force \
           $ca_flag; then
       success "Fleet Server installed"
@@ -1568,6 +1607,12 @@ write_summary() {
     echo ""
     echo "  Version:   ${ELASTIC_VERSION}"
     echo "  Topology:  ${TOPOLOGY}"
+    echo "  Cluster:   ${CLUSTER_NAME}"
+    echo "  Node:      ${NODE_NAME}"
+    if [[ "$INSTALL_ES" == true ]]; then
+      echo "  ES Data:   ${ES_DATA_DIR}"
+      echo "  ES Logs:   ${ES_LOG_DIR}"
+    fi
     echo "  Log file:  ${LOG_FILE}"
     echo ""
 
@@ -1676,10 +1721,13 @@ main() {
   if [[ "$TOPOLOGY" == "multi" ]]; then
     menu_multi_node
   else
+    menu_single_node
     menu_network
   fi
 
-  # Default node name
+  menu_data_dirs
+
+  # Default node name (fallback if not set by a menu)
   if [[ -z "$NODE_NAME" ]]; then NODE_NAME="$(hostname -s)"; fi
 
   menu_passwords
